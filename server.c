@@ -1,8 +1,9 @@
 /**
- * ftp_sync_dirs_fixed.c
- * Sincroniza PDFs do FTP mantendo a estrutura de diretórios.
- * Corrige o problema de recursão com strtok.
- * Compilar: gcc -o ftp_sync_dirs_fixed.exe ftp_sync_dirs_fixed.c -lcurl
+ * ftp_sync_dirs_move.c
+ * Transfere (move) PDFs do FTP mantendo a estrutura de diretórios.
+ * Após download bem-sucedido, ou se o arquivo local já estiver atualizado,
+ * o arquivo é excluído do FTP.
+ * Compilar: gcc -o ftp_sync_dirs_move.exe ftp_sync_dirs_move.c -lcurl
  */
 
 #include <stdio.h>
@@ -320,6 +321,49 @@ time_t get_local_mtime(const char *path) {
     if (stat(path, &st) != 0) return -1;
     return st.st_mtime;
 }
+
+/* Função auxiliar para excluir um arquivo do FTP */
+int ftp_delete_file(const char *remote_path) {
+    CURL *curl = curl_easy_init();
+    if (!curl) return -1;
+
+    curl_easy_setopt(curl, CURLOPT_USERNAME, cfg.user);
+    curl_easy_setopt(curl, CURLOPT_PASSWORD, cfg.pass);
+    curl_easy_setopt(curl, CURLOPT_PORT, cfg.port);
+    curl_easy_setopt(curl, CURLOPT_FTP_USE_EPSV, 1L);
+    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L); // Descomente para ver toda comunicação
+
+    char delete_cmd[2048];
+    snprintf(delete_cmd, sizeof(delete_cmd), "DELE %s", remote_path);
+
+    struct curl_slist *commands = NULL;
+    commands = curl_slist_append(commands, delete_cmd);
+    if (!commands) {
+        curl_easy_cleanup(curl);
+        return -1;
+    }
+
+    // URL do diretório pai (necessário para contexto FTP)
+    char url_dir[2048];
+    snprintf(url_dir, sizeof(url_dir), "ftp://%s:%d%s", cfg.host, cfg.port, "/FICHATECNICA/");
+    curl_easy_setopt(curl, CURLOPT_URL, url_dir);
+
+    // Use QUOTE (antes da transferência) em vez de POSTQUOTE
+    curl_easy_setopt(curl, CURLOPT_QUOTE, commands);
+    curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+
+    CURLcode res = curl_easy_perform(curl);
+    
+    // Exibe o erro detalhado
+    if (res != CURLE_OK) {
+        fprintf(stderr, "    Erro libcurl na exclusão: %s\n", curl_easy_strerror(res));
+    }
+
+    curl_slist_free_all(commands);
+    curl_easy_cleanup(curl);
+    return (res == CURLE_OK) ? 0 : -1;
+}
+
 int main(void) {
     if (!parse_env(".env")) {
         fprintf(stderr, "Erro ao ler .env\n");
@@ -351,7 +395,8 @@ int main(void) {
     MKDIR(cfg.destino);
 
     int baixados = 0;
-    printf("\nVerificando arquivos locais e baixando novidades...\n");
+    int removidos = 0;
+    printf("\nVerificando arquivos locais e transferindo do FTP...\n");
     for (size_t i = 0; i < pdf_count; i++) {
         char local_path[2048];
         snprintf(local_path, sizeof(local_path), "%s/%s", cfg.destino, pdf_list[i].relative_path);
@@ -368,7 +413,7 @@ int main(void) {
                    pdf_list[i].relative_path, ctime(&local_mtime), ctime(&pdf_list[i].mtime));
             precisa_baixar = true;
         } else {
-            printf("  [OK] %s (já atualizado)\n", pdf_list[i].relative_path);
+            printf("  [ATUAL] %s (já presente localmente)\n", pdf_list[i].relative_path);
         }
 
         if (precisa_baixar) {
@@ -378,6 +423,7 @@ int main(void) {
                 fprintf(stderr, "    Erro ao criar %s\n", local_path);
                 continue;
             }
+
             char url[2048];
             snprintf(url, sizeof(url), "ftp://%s:%d%s", cfg.host, cfg.port, pdf_list[i].full_path);
             curl_easy_setopt(curl, CURLOPT_URL, url);
@@ -385,16 +431,37 @@ int main(void) {
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, out);
             CURLcode res = curl_easy_perform(curl);
             fclose(out);
+
             if (res == CURLE_OK) {
                 printf("    -> Download concluído.\n");
                 baixados++;
+
+                // Excluir do FTP após download bem-sucedido
+                if (ftp_delete_file(pdf_list[i].full_path) == 0) {
+                    printf("    -> Arquivo removido do FTP.\n");
+                    removidos++;
+                } else {
+                    fprintf(stderr, "    -> Falha ao remover do FTP.\n");
+                }
             } else {
-                printf("    -> FALHA: %s\n", curl_easy_strerror(res));
+                printf("    -> FALHA NO DOWNLOAD: %s\n", curl_easy_strerror(res));
+                // Não remove o arquivo remoto se o download falhou
+            }
+        } else {
+            // Arquivo local já está atualizado: apenas excluir do FTP
+            printf("    -> Arquivo local já atualizado, excluindo do FTP...\n");
+            if (ftp_delete_file(pdf_list[i].full_path) == 0) {
+                printf("    -> Removido do FTP com sucesso.\n");
+                removidos++;
+            } else {
+                fprintf(stderr, "    -> Falha ao remover do FTP.\n");
             }
         }
     }
 
-    printf("\nSincronização finalizada. Arquivos baixados: %d\n", baixados);
+    printf("\nTransferência finalizada.\n");
+    printf("Arquivos baixados: %d\n", baixados);
+    printf("Arquivos removidos do FTP: %d\n", removidos);
 
     for (size_t i = 0; i < pdf_count; i++) {
         free(pdf_list[i].full_path);
