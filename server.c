@@ -331,7 +331,7 @@ int ftp_delete_file(const char *remote_path) {
     curl_easy_setopt(curl, CURLOPT_PASSWORD, cfg.pass);
     curl_easy_setopt(curl, CURLOPT_PORT, cfg.port);
     curl_easy_setopt(curl, CURLOPT_FTP_USE_EPSV, 1L);
-    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L); // Descomente para ver toda comunicação
+    //curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L); // Descomente para ver toda comunicação
 
     char delete_cmd[2048];
     snprintf(delete_cmd, sizeof(delete_cmd), "DELE %s", remote_path);
